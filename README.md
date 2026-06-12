@@ -138,6 +138,7 @@ Reproduce: `python -m headroom.evals suite --tier 1` · [Full benchmarks & metho
 | Cursor      | ✅              | prints config — paste once       |
 | Aider       | ✅              | starts proxy + launches          |
 | Copilot CLI | ✅              | starts proxy + launches          |
+| OpenCode    | ✅              | `--provider` + `--openai-api-url` for custom gateways |
 | OpenClaw    | ✅              | installs as ContextEngine plugin |
 
 Any OpenAI-compatible client works via `headroom proxy`. MCP-native: `headroom mcp install`.

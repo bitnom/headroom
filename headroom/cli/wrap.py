@@ -93,6 +93,8 @@ from headroom.providers.openclaw import (
 from headroom.providers.openclaw import (
     normalize_gateway_provider_ids as _normalize_openclaw_gateway_provider_ids_impl,
 )
+from headroom.providers.opencode import build_launch_env as _build_opencode_launch_env
+from headroom.providers.opencode import resolve_upstream_url as _resolve_opencode_upstream_url
 from headroom.proxy.project_context import with_project_prefix as _with_project_prefix
 
 from .main import main
@@ -1593,6 +1595,71 @@ def _normalize_proxy_api_url(url: object) -> str | None:
     return normalized or None
 
 
+def _running_proxy_openai_upstream(port: int) -> str | None:
+    """Return the normalized OpenAI upstream URL for a running Headroom proxy."""
+    health_payload = _query_proxy_health(port)
+    running_config = _proxy_health_config(health_payload)
+    if running_config is None:
+        running_config = _query_proxy_config(port)
+    if running_config is None:
+        return None
+    return _normalize_proxy_api_url(running_config.get("openai_api_url"))
+
+
+def _resolve_proxy_port_for_upstream(
+    port: int,
+    *,
+    openai_api_url: str | None,
+    no_proxy: bool,
+    max_scan: int = 50,
+) -> int:
+    """Pick a proxy port compatible with the requested OpenAI upstream.
+
+    When another wrapper already owns ``port`` with a different upstream
+    (e.g. ``headroom wrap grok`` on 8787 while OpenCode needs
+    codex-everywhere.com), silently reusing that proxy sends credentials to the
+    wrong provider and yields confusing 401s. Scan for a free port instead.
+    """
+    if no_proxy or not openai_api_url:
+        return port
+    if not _check_proxy(port):
+        return port
+
+    requested_upstream = _normalize_proxy_api_url(openai_api_url)
+    running_upstream = _running_proxy_openai_upstream(port)
+    if running_upstream is None or running_upstream == requested_upstream:
+        return port
+
+    other_wrappers = _live_proxy_clients(port, exclude_self=True)
+    persistent_manifest = _find_persistent_manifest(port)
+    if not other_wrappers and persistent_manifest is None:
+        # _ensure_proxy can restart the lone proxy with the new upstream.
+        return port
+
+    for candidate in range(port + 1, port + max_scan):
+        if _check_proxy(candidate):
+            if _running_proxy_openai_upstream(candidate) == requested_upstream:
+                click.echo(
+                    f"  Port {port} proxy forwards to {running_upstream}; "
+                    f"reusing compatible proxy on port {candidate}."
+                )
+                return candidate
+            continue
+        if _port_bind_error(candidate) is None:
+            click.echo(
+                f"  Port {port} proxy forwards to {running_upstream} but this session "
+                f"needs {requested_upstream}; starting a dedicated proxy on port {candidate}."
+            )
+            return candidate
+
+    raise click.ClickException(
+        f"Proxy on port {port} forwards to {running_upstream}, but this session "
+        f"needs {requested_upstream} and {len(other_wrappers)} other wrapper(s) "
+        f"are still attached. Stop the other wrappers or pass --port with a free "
+        "port that has no conflicting proxy."
+    )
+
+
 def _proxy_version(payload: dict[str, Any] | None) -> str | None:
     """Return the running proxy version when it exposes one."""
     if payload is None:
@@ -1970,6 +2037,18 @@ def _ensure_proxy(
                     )
                     other_wrappers = helpers._live_proxy_clients(port, exclude_self=True)
                     if other_wrappers:
+                        if "openai-api-url" in missing and openai_api_url:
+                            running_openai_url = _normalize_proxy_api_url(
+                                running_config.get("openai_api_url")
+                            )
+                            requested_openai_url = _normalize_proxy_api_url(openai_api_url)
+                            raise click.ClickException(
+                                f"Proxy on port {port} forwards to {running_openai_url}, "
+                                f"but this session needs {requested_openai_url} and "
+                                f"{len(other_wrappers)} other wrapper(s) are still attached. "
+                                "Use --port with a free port (Headroom will pick one "
+                                "automatically for `wrap opencode --provider …`)."
+                            )
                         # Another wrapper is attached to this proxy; restarting it
                         # to add flags would drop their in-flight requests. Reuse
                         # the running proxy as-is rather than disrupt them.
@@ -2488,6 +2567,7 @@ def wrap() -> None:
         headroom wrap continue            # Continue (VS Code/JetBrains; injects systemMessage)
         headroom wrap goose               # Goose (Block) CLI
         headroom wrap openhands           # OpenHands CLI
+        headroom wrap opencode            # OpenCode CLI
         headroom wrap openclaw            # OpenClaw plugin bootstrap
 
     \b
@@ -2499,9 +2579,7 @@ def wrap() -> None:
           ANTHROPIC_BASE_URL / OPENAI_BASE_URL yourself.
 
     \b
-    Note: `headroom wrap opencode` does NOT exist. For opencode, run
-    `headroom proxy` and point opencode at it via OPENAI_BASE_URL.
-    `openclaw` is a separate tool — different from opencode.
+    Note: `openclaw` is a separate tool — different from `opencode`.
     """
 
 
@@ -3452,6 +3530,130 @@ def grok(
         anyllm_provider=anyllm_provider,
         region=region,
         openai_api_url=_GROK_DEFAULT_API_URL,
+    )
+
+
+# =============================================================================
+# OpenCode
+# =============================================================================
+
+
+@wrap.command(context_settings={"ignore_unknown_options": True})
+@click.option("--port", "-p", default=8787, type=int, help="Proxy port (default: 8787)")
+@click.option("--no-proxy", is_flag=True, help="Skip proxy startup (use existing proxy)")
+@click.option(
+    "--learn", is_flag=True, help="Enable live traffic learning (patterns saved to MEMORY.md)"
+)
+@click.option("--memory", is_flag=True, help="Enable persistent cross-session memory")
+@click.option(
+    "--backend", default=None, help="API backend: 'anthropic', 'anyllm', 'litellm-vertex', etc."
+)
+@click.option("--anyllm-provider", default=None, help="Provider for any-llm backend")
+@click.option("--region", default=None, help="Cloud region for Bedrock/Vertex")
+@click.option(
+    "--openai-api-url",
+    default=None,
+    envvar="HEADROOM_OPENCODE_UPSTREAM_URL",
+    help=(
+        "Override the upstream URL Headroom forwards to after compression. "
+        "When omitted with --provider, the URL is read from that provider's "
+        "options.baseURL in opencode.json (env: HEADROOM_OPENCODE_UPSTREAM_URL)"
+    ),
+)
+@click.option(
+    "--provider",
+    default=None,
+    envvar="HEADROOM_OPENCODE_PROVIDER",
+    help=(
+        "OpenCode provider id from opencode.json to override at launch "
+        "(sets OPENCODE_CONFIG_CONTENT provider.options.baseURL)"
+    ),
+)
+@click.option("--verbose", "-v", is_flag=True, help="Verbose output")
+@click.argument("opencode_args", nargs=-1, type=click.UNPROCESSED)
+def opencode(
+    port: int,
+    no_proxy: bool,
+    learn: bool,
+    memory: bool,
+    backend: str | None,
+    anyllm_provider: str | None,
+    region: str | None,
+    openai_api_url: str | None,
+    provider: str | None,
+    verbose: bool,
+    opencode_args: tuple[str, ...],
+) -> None:
+    """Launch OpenCode through Headroom proxy.
+
+    \b
+    Routes OpenCode's API traffic through Headroom while preserving your
+    existing provider credentials. With ``--provider``, Headroom reads that
+    provider's ``options.baseURL`` from ``opencode.json`` and uses it as the
+    proxy upstream automatically.
+
+    \b
+    Examples:
+        headroom wrap opencode --provider my-gateway
+        headroom wrap opencode --provider my-gateway \\
+            --openai-api-url https://override.example.com/v1
+        headroom wrap opencode -- run "fix the failing test"
+        headroom wrap opencode --port 9999 --no-proxy
+    """
+    opencode_bin = shutil.which("opencode")
+    if not opencode_bin:
+        raise click.ClickException(
+            "'opencode' not found in PATH. Install OpenCode: https://opencode.ai/"
+        )
+
+    provider_id = (provider or os.environ.get("HEADROOM_OPENCODE_PROVIDER") or "").strip()
+    upstream_url = _resolve_opencode_upstream_url(
+        cli_value=openai_api_url,
+        provider=provider_id or None,
+        environ=os.environ,
+        cwd=Path.cwd(),
+    )
+    if provider_id and upstream_url is None:
+        raise click.ClickException(
+            f"Provider '{provider_id}' has no usable options.baseURL in opencode.json. "
+            "Add one to your OpenCode config or pass --openai-api-url explicitly."
+        )
+    if upstream_url is None and verbose:
+        click.echo(
+            "  Note: no --provider/upstream configured; proxy upstream defaults to "
+            "api.openai.com."
+        )
+    elif upstream_url and provider_id and openai_api_url is None and verbose:
+        click.echo(f"  Upstream auto-detected from opencode.json: {upstream_url}")
+
+    proxy_port = _resolve_proxy_port_for_upstream(
+        port,
+        openai_api_url=upstream_url,
+        no_proxy=no_proxy,
+    )
+
+    env, env_vars_display = _build_opencode_launch_env(
+        proxy_port,
+        os.environ,
+        provider=provider,
+        cwd=Path.cwd(),
+    )
+
+    _launch_tool(
+        binary=opencode_bin,
+        args=opencode_args,
+        env=env,
+        port=proxy_port,
+        no_proxy=no_proxy,
+        tool_label="OPENCODE",
+        env_vars_display=env_vars_display,
+        learn=learn,
+        memory=memory,
+        agent_type="opencode",
+        backend=backend,
+        anyllm_provider=anyllm_provider,
+        region=region,
+        openai_api_url=upstream_url,
     )
 
 
