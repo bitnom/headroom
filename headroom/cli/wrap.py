@@ -1627,11 +1627,15 @@ def _resolve_proxy_port_for_upstream(
 
     requested_upstream = _normalize_proxy_api_url(openai_api_url)
     running_upstream = _running_proxy_openai_upstream(port)
-    if running_upstream is None or running_upstream == requested_upstream:
+    if running_upstream == requested_upstream:
         return port
 
     other_wrappers = _live_proxy_clients(port, exclude_self=True)
     persistent_manifest = _find_persistent_manifest(port)
+    if running_upstream is None and not other_wrappers and persistent_manifest is None:
+        # _ensure_proxy can validate/restart a lone ephemeral proxy that does
+        # not expose upstream metadata.
+        return port
     if not other_wrappers and persistent_manifest is None:
         # _ensure_proxy can restart the lone proxy with the new upstream.
         return port
@@ -3513,13 +3517,19 @@ def grok(
             "'grok' not found in PATH. Install Grok Build: https://grok.com/build"
         )
 
-    env, env_vars_display = _build_grok_launch_env(port, os.environ)
+    proxy_port = _resolve_proxy_port_for_upstream(
+        port,
+        openai_api_url=_GROK_DEFAULT_API_URL,
+        no_proxy=no_proxy,
+    )
+
+    env, env_vars_display = _build_grok_launch_env(proxy_port, os.environ)
 
     _launch_tool(
         binary=grok_bin,
         args=grok_args,
         env=env,
-        port=port,
+        port=proxy_port,
         no_proxy=no_proxy,
         tool_label="GROK",
         env_vars_display=env_vars_display,

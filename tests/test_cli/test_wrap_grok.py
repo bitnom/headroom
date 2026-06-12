@@ -106,8 +106,9 @@ def test_wrap_grok_forwards_real_cli_shapes(
         captured.update(kwargs)
 
     with patch("headroom.cli.wrap.shutil.which", return_value="grok"):
-        with patch("headroom.cli.wrap._launch_tool", side_effect=fake_launch_tool):
-            result = runner.invoke(main, ["wrap", "grok", *cli_args])
+        with patch("headroom.cli.wrap._resolve_proxy_port_for_upstream", return_value=8787):
+            with patch("headroom.cli.wrap._launch_tool", side_effect=fake_launch_tool):
+                result = runner.invoke(main, ["wrap", "grok", *cli_args])
 
     assert result.exit_code == 0, result.output
     assert captured["args"] == expected_grok_args
@@ -126,8 +127,9 @@ def test_wrap_grok_sets_proxy_env(
         captured.update(kwargs)
 
     with patch("headroom.cli.wrap.shutil.which", return_value="grok"):
-        with patch("headroom.cli.wrap._launch_tool", side_effect=fake_launch_tool):
-            result = runner.invoke(main, ["wrap", "grok", "-p", "fix the bug"])
+        with patch("headroom.cli.wrap._resolve_proxy_port_for_upstream", return_value=8787):
+            with patch("headroom.cli.wrap._launch_tool", side_effect=fake_launch_tool):
+                result = runner.invoke(main, ["wrap", "grok", "-p", "fix the bug"])
 
     assert result.exit_code == 0, result.output
     env = captured["env"]
@@ -149,11 +151,12 @@ def test_wrap_grok_keeps_headroom_port_long_option(
         captured.update(kwargs)
 
     with patch("headroom.cli.wrap.shutil.which", return_value="grok"):
-        with patch("headroom.cli.wrap._launch_tool", side_effect=fake_launch_tool):
-            result = runner.invoke(
-                main,
-                ["wrap", "grok", "--port", "9999", "-p", "ship the feature"],
-            )
+        with patch("headroom.cli.wrap._resolve_proxy_port_for_upstream", return_value=9999):
+            with patch("headroom.cli.wrap._launch_tool", side_effect=fake_launch_tool):
+                result = runner.invoke(
+                    main,
+                    ["wrap", "grok", "--port", "9999", "-p", "ship the feature"],
+                )
 
     assert result.exit_code == 0, result.output
     assert captured["port"] == 9999
@@ -173,11 +176,34 @@ def test_wrap_grok_sets_grok_upstream_for_proxy(
         captured.update(kwargs)
 
     with patch("headroom.cli.wrap.shutil.which", return_value="grok"):
-        with patch("headroom.cli.wrap._launch_tool", side_effect=fake_launch_tool):
-            result = runner.invoke(main, ["wrap", "grok"])
+        with patch("headroom.cli.wrap._resolve_proxy_port_for_upstream", return_value=8787):
+            with patch("headroom.cli.wrap._launch_tool", side_effect=fake_launch_tool):
+                result = runner.invoke(main, ["wrap", "grok"])
 
     assert result.exit_code == 0, result.output
     assert captured["openai_api_url"] == DEFAULT_API_URL
+
+
+def test_wrap_grok_uses_dedicated_port_when_default_proxy_has_wrong_upstream(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    captured: dict[str, object] = {}
+
+    def fake_launch_tool(**kwargs):  # noqa: ANN003
+        captured.update(kwargs)
+
+    with patch("headroom.cli.wrap.shutil.which", return_value="grok"):
+        with patch("headroom.cli.wrap._resolve_proxy_port_for_upstream", return_value=8788):
+            with patch("headroom.cli.wrap._launch_tool", side_effect=fake_launch_tool):
+                result = runner.invoke(main, ["wrap", "grok", "-p", "hello"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["port"] == 8788
+    assert captured["openai_api_url"] == DEFAULT_API_URL
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env[GROK_PROXY_ENV] == "http://127.0.0.1:8788/v1"
 
 
 def test_wrap_grok_forwards_headroom_backend_options(
@@ -190,22 +216,23 @@ def test_wrap_grok_forwards_headroom_backend_options(
         captured.update(kwargs)
 
     with patch("headroom.cli.wrap.shutil.which", return_value="grok"):
-        with patch("headroom.cli.wrap._launch_tool", side_effect=fake_launch_tool):
-            result = runner.invoke(
-                main,
-                [
-                    "wrap",
-                    "grok",
-                    "--backend",
-                    "anyllm",
-                    "--anyllm-provider",
-                    "groq",
-                    "--learn",
-                    "--memory",
-                    "-p",
-                    "refactor auth module",
-                ],
-            )
+        with patch("headroom.cli.wrap._resolve_proxy_port_for_upstream", return_value=8787):
+            with patch("headroom.cli.wrap._launch_tool", side_effect=fake_launch_tool):
+                result = runner.invoke(
+                    main,
+                    [
+                        "wrap",
+                        "grok",
+                        "--backend",
+                        "anyllm",
+                        "--anyllm-provider",
+                        "groq",
+                        "--learn",
+                        "--memory",
+                        "-p",
+                        "refactor auth module",
+                    ],
+                )
 
     assert result.exit_code == 0, result.output
     assert captured["backend"] == "anyllm"
@@ -225,8 +252,9 @@ def test_wrap_grok_forwards_no_proxy(
         captured.update(kwargs)
 
     with patch("headroom.cli.wrap.shutil.which", return_value="grok"):
-        with patch("headroom.cli.wrap._launch_tool", side_effect=fake_launch_tool):
-            result = runner.invoke(main, ["wrap", "grok", "--no-proxy"])
+        with patch("headroom.cli.wrap._resolve_proxy_port_for_upstream", return_value=8787):
+            with patch("headroom.cli.wrap._launch_tool", side_effect=fake_launch_tool):
+                result = runner.invoke(main, ["wrap", "grok", "--no-proxy"])
 
     assert result.exit_code == 0, result.output
     assert captured["no_proxy"] is True

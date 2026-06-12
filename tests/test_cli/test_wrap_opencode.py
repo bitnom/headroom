@@ -331,6 +331,30 @@ def test_resolve_proxy_port_picks_free_port_for_persistent_upstream_conflict(
     assert resolved == 8788
 
 
+def test_resolve_proxy_port_picks_free_port_for_unknown_persistent_upstream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Manifest:
+        pass
+
+    def fake_check_proxy(port: int) -> bool:
+        return port == 8787
+
+    monkeypatch.setattr("headroom.cli.wrap._check_proxy", fake_check_proxy)
+    monkeypatch.setattr("headroom.cli.wrap._running_proxy_openai_upstream", lambda port: None)
+    monkeypatch.setattr("headroom.cli.wrap._live_proxy_clients", lambda *a, **kw: [])
+    monkeypatch.setattr("headroom.cli.wrap._find_persistent_manifest", lambda port: Manifest())
+    monkeypatch.setattr("headroom.cli.wrap._port_bind_error", lambda port: None)
+
+    resolved = _resolve_proxy_port_for_upstream(
+        8787,
+        openai_api_url="https://cli-chat-proxy.grok.com/v1",
+        no_proxy=False,
+    )
+
+    assert resolved == 8788
+
+
 def test_wrap_opencode_uses_dedicated_port_when_default_proxy_has_wrong_upstream(
     runner: CliRunner,
     tmp_path: Path,
