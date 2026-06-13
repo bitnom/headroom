@@ -200,6 +200,45 @@ def test_wrap_opencode_preserves_provider_api_key_in_overlay(
     assert env["OPENAI_API_KEY"] == "sk-test-key"
 
 
+def test_wrap_opencode_propagates_codexeverywhere_context_limit(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_opencode_config_home: Path,
+) -> None:
+    del isolated_opencode_config_home
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "opencode.json").write_text(
+        json.dumps(
+            {
+                "model": "codexeverywhere/gpt-5.5",
+                "provider": {
+                    "codexeverywhere": {
+                        "options": {"baseURL": "https://gateway.example.com/v1"},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_launch_tool(**kwargs):  # noqa: ANN003
+        captured.update(kwargs)
+
+    with patch("headroom.cli.wrap.shutil.which", return_value="opencode"):
+        with patch("headroom.cli.wrap._resolve_proxy_port_for_upstream", return_value=8787):
+            with patch("headroom.cli.wrap._launch_tool", side_effect=fake_launch_tool):
+                result = runner.invoke(main, ["wrap", "opencode", "--provider", "codexeverywhere"])
+
+    assert result.exit_code == 0, result.output
+    env = captured["env"]
+    assert isinstance(env, dict)
+    overlay = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+    model = overlay["provider"]["codexeverywhere"]["models"]["gpt-5.5"]
+    assert model["limit"]["context"] == 500000
+
+
 def test_wrap_opencode_auto_detects_upstream_from_provider_config(
     runner: CliRunner,
     tmp_path: Path,

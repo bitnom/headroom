@@ -14,6 +14,8 @@ from urllib.parse import urlparse
 logger = logging.getLogger(__name__)
 
 _CONFIG_FILENAMES = ("opencode.json", "opencode.jsonc")
+_CODEXEVERYWHERE_PROVIDER_ID = "codexeverywhere"
+_CODEXEVERYWHERE_CONTEXT_LIMIT = 500_000
 
 
 def _strip_jsonc_comments(text: str) -> str:
@@ -176,6 +178,46 @@ def extract_provider_entry(config: Mapping[str, Any], provider_id: str) -> dict[
     return dict(entry)
 
 
+def _configured_provider_model_ids(config: Mapping[str, Any], provider_id: str) -> set[str]:
+    """Return root model selections that belong to ``provider_id``."""
+    model_ids: set[str] = set()
+    prefix = f"{provider_id}/"
+    for key in ("model", "small_model"):
+        value = config.get(key)
+        if isinstance(value, str) and value.startswith(prefix):
+            model_id = value[len(prefix) :].strip()
+            if model_id:
+                model_ids.add(model_id)
+    return model_ids
+
+
+def _apply_codexeverywhere_model_limits(
+    overlay_entry: dict[str, Any],
+    provider_id: str,
+    config: Mapping[str, Any],
+) -> None:
+    """Tell OpenCode that codexeverywhere models have a 500K context window."""
+    if provider_id != _CODEXEVERYWHERE_PROVIDER_ID:
+        return
+
+    existing_models = overlay_entry.get("models")
+    models = dict(existing_models) if isinstance(existing_models, dict) else {}
+    model_ids = set(models) | _configured_provider_model_ids(config, provider_id)
+    if not model_ids:
+        return
+
+    for model_id in model_ids:
+        existing_model = models.get(model_id)
+        model_entry = dict(existing_model) if isinstance(existing_model, dict) else {}
+        existing_limit = model_entry.get("limit")
+        limit = dict(existing_limit) if isinstance(existing_limit, dict) else {}
+        limit["context"] = _CODEXEVERYWHERE_CONTEXT_LIMIT
+        model_entry["limit"] = limit
+        models[model_id] = model_entry
+
+    overlay_entry["models"] = models
+
+
 def build_provider_proxy_overlay(
     provider_id: str,
     proxy_base: str,
@@ -192,20 +234,17 @@ def build_provider_proxy_overlay(
     only rewrite URL fields.
     """
     provider = provider_id.strip()
-    entry = extract_provider_entry(
-        load_merged_opencode_config(environ=environ, cwd=cwd),
-        provider,
-    )
+    config = load_merged_opencode_config(environ=environ, cwd=cwd)
+    entry = extract_provider_entry(config, provider)
     overlay_entry = dict(entry)
-    options = (
-        dict(entry["options"]) if isinstance(entry.get("options"), dict) else {}
-    )
+    options = dict(entry["options"]) if isinstance(entry.get("options"), dict) else {}
     options["baseURL"] = proxy_base
     overlay_entry["options"] = options
     if "api" in overlay_entry:
         overlay_entry["api"] = proxy_base
     if "baseURL" in overlay_entry:
         overlay_entry["baseURL"] = proxy_base
+    _apply_codexeverywhere_model_limits(overlay_entry, provider, config)
     return {"provider": {provider: overlay_entry}}
 
 

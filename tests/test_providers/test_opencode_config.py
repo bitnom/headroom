@@ -82,6 +82,42 @@ def test_build_provider_proxy_overlay_preserves_api_key(
     assert entry["npm"] == "@ai-sdk/openai"
 
 
+def test_build_provider_proxy_overlay_sets_codexeverywhere_context_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "empty-config"))
+    monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+    monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
+    (tmp_path / "opencode.json").write_text(
+        json.dumps(
+            {
+                "model": "codexeverywhere/gpt-5.5",
+                "provider": {
+                    "codexeverywhere": {
+                        "npm": "@ai-sdk/openai",
+                        "options": {
+                            "baseURL": "https://gateway.example.com/v1",
+                        },
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    overlay = build_provider_proxy_overlay(
+        "codexeverywhere",
+        "http://127.0.0.1:8787/v1",
+        environ={},
+        cwd=tmp_path,
+    )
+
+    model = overlay["provider"]["codexeverywhere"]["models"]["gpt-5.5"]
+    assert model["limit"]["context"] == 500000
+
+
 def test_extract_provider_upstream_prefers_base_url() -> None:
     config = {
         "provider": {
@@ -157,9 +193,7 @@ def test_load_merged_opencode_config_project_overrides_global(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "home" / ".config"))
 
     merged = load_merged_opencode_config(cwd=tmp_path)
-    assert (
-        extract_provider_upstream(merged, "my-gateway") == "https://project.example.com/v1"
-    )
+    assert extract_provider_upstream(merged, "my-gateway") == "https://project.example.com/v1"
 
 
 def test_resolve_upstream_url_auto_detects_from_provider(
